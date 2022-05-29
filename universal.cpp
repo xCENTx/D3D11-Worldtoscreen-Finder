@@ -32,6 +32,11 @@ using namespace DirectX;
 
 #pragma warning( disable : 4244 )
 
+//	Included variable to safely detach the dll from the target process
+HMODULE  g_hModule{};
+bool g_Killswitch = FALSE;
+bool g_Running = FALSE;
+void Unhook();
 
 typedef HRESULT(__stdcall *D3D11PresentHook) (IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags);
 typedef HRESULT(__stdcall *D3D11ResizeBuffersHook) (IDXGISwapChain *pSwapChain, UINT BufferCount, UINT Width, UINT Height, DXGI_FORMAT NewFormat, UINT SwapChainFlags);
@@ -65,6 +70,7 @@ DWORD_PTR* pDeviceVTable = NULL;
 
 #include "main.h" //helper funcs
 
+
 //==========================================================================================================================
 
 extern LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -85,8 +91,9 @@ void InitImGuiD3D11()
 }
 
 LRESULT __stdcall WndProc(const HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
-	if (ImGui_ImplWin32_WndProcHandler(hWnd, uMsg, wParam, lParam)) {
-		return true;
+	if (showmenu) {
+		ImGui_ImplWin32_WndProcHandler((HWND)oWndProc, uMsg, wParam, lParam);
+		return TRUE;
 	}
 	return CallWindowProc(oWndProc, hWnd, uMsg, wParam, lParam);
 }
@@ -109,6 +116,14 @@ HRESULT __stdcall hookD3D11ResizeBuffers(IDXGISwapChain *pSwapChain, UINT Buffer
 
 HRESULT __stdcall hookD3D11Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags)
 {
+	if (g_Killswitch) {
+		//	FORWARD MOTION TO DETACH
+		phookD3D11Present(pSwapChain, SyncInterval, Flags);
+		g_Running = FALSE;
+		Unhook();
+		return 0;
+	}
+
 	if (!initonce)
 	{
 		if (SUCCEEDED(pSwapChain->GetDevice(__uuidof(ID3D11Device), (void**)&pDevice)))
@@ -178,7 +193,7 @@ HRESULT __stdcall hookD3D11Present(IDXGISwapChain* pSwapChain, UINT SyncInterval
 	ScreenCenterX = ViewportWidth / 2.0f;
 	ScreenCenterY = ViewportHeight / 2.0f;
 
-	if (GetAsyncKeyState(VK_INSERT) & 1) {
+	if (GetAsyncKeyState(VK_NUMPAD9) & 1) {
 		SaveCfg(); //save settings
 		showmenu = !showmenu;
 	}
@@ -190,49 +205,107 @@ HRESULT __stdcall hookD3D11Present(IDXGISwapChain* pSwapChain, UINT SyncInterval
 
 	if (showmenu) {
 
-		ImGui::Begin("Hack Menu");
+		if (!ImGui::Begin("Hack Menu", NULL, 96))
+		{
+			ImGui::End();
+			return (pSwapChain, SyncInterval, Flags);
+		}
 		ImGui::Checkbox("Wallhack", &wallhack);
 		ImGui::Checkbox("Chams", &chams);
 		ImGui::Checkbox("Esp", &esp);
-		//circle esp
-		//line esp
-		//text esp
-		//distance esp
 		ImGui::Checkbox("Aimbot", &aimbot);
-		ImGui::SliderInt("Aimsens", &aimsens, 0, 10);
-		ImGui::Text("Aimkey");
+		ImGui::Spacing();
+		ImGui::Separator();
+		ImGui::Spacing();
+
+		ImGui::Checkbox("Autoshoot", &autoshoot);
+		ImGui::Text("Aimsens                ");
+		ImGui::SameLine();
+		ImGui::SliderInt("##AimsensSlider", &aimsens, 0, 10);
+		
+		ImGui::Text("Aimkey                 ");
 		const char* aimkey_Options[] = { "Shift", "Right Mouse", "Left Mouse", "Middle Mouse", "Ctrl", "Alt", "Capslock", "Space", "X", "C", "V" };
 		ImGui::SameLine();
 		ImGui::Combo("##AimKey", (int*)&aimkey, aimkey_Options, IM_ARRAYSIZE(aimkey_Options));
-		ImGui::SliderInt("Aimfov", &aimfov, 0, 10);
-		ImGui::SliderInt("Aimspeed uses distance", &aimspeed_isbasedon_distance, 0, 4);
-		ImGui::SliderInt("Aimspeed", &aimspeed, 0, 100);
-		ImGui::SliderInt("Aimheight", &aimheight, 0, 200);
-		ImGui::Checkbox("Autoshoot", &autoshoot);
-		ImGui::SliderInt("As xhair dst", &as_xhairdst, 0, 20);
-		//as_compensatedst
+
+		ImGui::Text("Aimfov                 ");
+		ImGui::SameLine();
+		ImGui::SliderInt("##Aimfov", &aimfov, 0, 10);
+		
+		ImGui::Text("Aimspeed uses distance ");
+		ImGui::SameLine();
+		ImGui::SliderInt("##Aimspeed", &aimspeed_isbasedon_distance, 0, 4);
+		
+		ImGui::Text("Aimspeed               ");
+		ImGui::SameLine();
+		ImGui::SliderInt("##Aimspeed2", &aimspeed, 0, 100);
+
+		ImGui::Text("Aimheight              ");
+		ImGui::SameLine();
+		ImGui::SliderInt("##Aimheight", &aimheight, 0, 200);
+
+		ImGui::Text("As xhair dst           ");
+		ImGui::SameLine();
+		ImGui::SliderInt("##Asxhairdst", &as_xhairdst, 0, 20);
+		ImGui::Spacing();
+		ImGui::Separator();
+		ImGui::Spacing();
 
 		ImGui::Checkbox("Modelrecfinder", &modelrecfinder);
 		if (modelrecfinder == 1)
 		{
-			if(check_draw_result==1)ImGui::Text("Draw called."); ImGui::SameLine();
-			if (check_drawindexed_result == 1)ImGui::Text("DrawIndexed called."); ImGui::SameLine();
-			if (check_drawindexedinstanced_result == 1)ImGui::Text("DrawIndexedInstanced called."); 
+			if(check_draw_result==1)
+				ImGui::Text("Draw called."); ImGui::SameLine();
+			
+			if (check_drawindexed_result == 1)
+				ImGui::Text("DrawIndexed called."); ImGui::SameLine();
+			
+			if (check_drawindexedinstanced_result == 1)
+				ImGui::Text("DrawIndexedInstanced called."); 
 
-			//ImGui::SliderInt("Modelfind Mode", &modelfindmode, 1, 3);
 			ImGui::NewLine();
-			if (modelfindmode == 1)ImGui::SliderInt("Modelfind Mode 1 (Step 10)", &modelfindmode, 1, 3); 
-			else if (modelfindmode == 2)ImGui::SliderInt("Modelfind Mode 2 (Step 100)", &modelfindmode, 1, 3);
-			else if (modelfindmode == 3)ImGui::SliderInt("Modelfind Mode 3 (Step 1000)", &modelfindmode, 1, 3);
+			switch (modelfindmode) {
+			case(1): {
+				ImGui::Text("Modelfind Mode 1 (Step 10)      ");
+				ImGui::SameLine();
+				ImGui::SliderInt("##ModelfindMode", &modelfindmode, 1, 3);
+				break;
+			}
+			case(2): {
+				ImGui::Text("Modelfind Mode 2 (Step 100)     ");
+				ImGui::SameLine();
+				ImGui::SliderInt("##ModelfindMode2", &modelfindmode, 1, 3);
+				break;
+			}
+			case(3): {
+				ImGui::Text("Modelfind Mode 2 (Step 1000)    ");
+				ImGui::SameLine();
+				ImGui::SliderInt("##ModelfindMode3", &modelfindmode, 1, 3);
+				break;
+			}
+			}
 
-			//bruteforce
-			ImGui::SliderInt("find Stride", &countStride, -1, 100);
-			ImGui::SliderInt("find IndexCount", &countIndexCount, -1, 100);
-			ImGui::SliderInt("find veWidth", &countveWidth, -1, 100);
-			ImGui::SliderInt("find pscWidth", &countpscWidth, -1, 100);
+			ImGui::Text("find Stride                     ");
+			ImGui::SameLine();
+			ImGui::SliderInt("##findStride", &countStride, -1, 100);
+
+			ImGui::Text("find IndexCount                 ");
+			ImGui::SameLine();
+			ImGui::SliderInt("##findIndexCount", &countIndexCount, -1, 100);
+
+			ImGui::Text("find veWidth                    ");
+			ImGui::SameLine();
+			ImGui::SliderInt("##findveWidth", &countveWidth, -1, 100);
+
+			ImGui::Text("find pscWidth                   ");
+			ImGui::SameLine();
+			ImGui::SliderInt("##findpscWidth", &countpscWidth, -1, 100);
 
 		}
 		ImGui::Checkbox("Dump Shader", &dumpshader);
+		ImGui::Spacing();
+		ImGui::Separator();
+		ImGui::Spacing();
 
 		ImGui::Checkbox("Wtsfinder", &wtsfinder);
 		if (wtsfinder == 1)
@@ -257,11 +330,23 @@ HRESULT __stdcall hookD3D11Present(IDXGISwapChain* pSwapChain, UINT SyncInterval
 				g_dwLastAction = dwTicks;
 			}
 			//bruteforce
-			ImGui::SliderInt("WorldViewCBnum", &WorldViewCBnum, 0, 10);
-			ImGui::SliderInt("ProjCBnum", &ProjCBnum, 0, 10);
-			ImGui::SliderInt("matProjnum", &matProjnum, 0, 100);//240
-		}
+			ImGui::Text("WorldViewCBnum ");
+			ImGui::SameLine();
+			ImGui::SliderInt("##WorldViewCBnum", &WorldViewCBnum, 0, 10);
 
+			ImGui::Text("ProjCBnum      ");
+			ImGui::SameLine();
+			ImGui::SliderInt("##ProjCBnum", &ProjCBnum, 0, 10);
+
+			ImGui::Text("matProjnum     ");
+			ImGui::SameLine();
+			ImGui::SliderInt("##matProjnum", &matProjnum, 0, 100);//240
+		}
+		ImGui::Spacing();
+		ImGui::Separator();
+		ImGui::Spacing();
+
+		if (ImGui::Button("UNHOOK DLL", ImVec2(ImGui::GetWindowContentRegionWidth() - 3, 20))) g_Killswitch = TRUE;
 		ImGui::End();
 	}
 
@@ -391,10 +476,15 @@ HRESULT __stdcall hookD3D11Present(IDXGISwapChain* pSwapChain, UINT SyncInterval
 
 	return phookD3D11Present(pSwapChain, SyncInterval, Flags);
 }
+
 //==========================================================================================================================
 
 void __stdcall hookD3D11DrawIndexed(ID3D11DeviceContext* pContext, UINT IndexCount, UINT StartIndexLocation, INT BaseVertexLocation)
 {
+
+	if (g_Killswitch)
+		return phookD3D11DrawIndexed(pContext, IndexCount, StartIndexLocation, BaseVertexLocation);
+
 	if (IndexCount > 0)
 		check_drawindexed_result = 1;
 
@@ -639,6 +729,22 @@ static HRESULT WINAPI GeometryShaderWithStreamOutputHook(ID3D11Device* pDevice, 
 
 //==========================================================================================================================
 
+void Unhook()
+{
+	SetWindowLongPtr(window, GWLP_WNDPROC, (LONG_PTR)oWndProc);
+	//MH_DisableHook((DWORD_PTR*)pSwapChainVtable[8]);
+	//MH_DisableHook((DWORD_PTR*)pSwapChainVtable[13]);
+	//MH_DisableHook((DWORD_PTR*)pContextVTable[12]);
+	//MH_DisableHook((DWORD_PTR*)pContextVTable[20]);
+	//MH_DisableHook((DWORD_PTR*)pContextVTable[13]);
+	//MH_DisableHook((DWORD_PTR*)pContextVTable[7]);
+	//MH_DisableHook((DWORD_PTR*)pDeviceVTable[15]);
+	//MH_DisableHook((DWORD_PTR*)pDeviceVTable[12]);
+	//MH_RemoveHook(MH_ALL_HOOKS);
+	//MH_Uninitialize();
+	return;
+}
+
 const int MultisampleCount = 1; // Set to 1 to disable multisampling
 LRESULT CALLBACK DXGIMsgProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam){ return DefWindowProc(hwnd, uMsg, wParam, lParam); }
 DWORD __stdcall InitializeHook(LPVOID)
@@ -761,15 +867,16 @@ DWORD __stdcall InitializeHook(LPVOID)
 	
     DWORD dwOld;
     VirtualProtect(phookD3D11Present, 2, PAGE_EXECUTE_READWRITE, &dwOld);
-
-	while (true) {
+	g_Running = TRUE;
+	while (g_Running) {
 		Sleep(10);
 	}
 
 	pDevice->Release();
 	pContext->Release();
 	pSwapChain->Release();
-
+	Sleep(500);
+	FreeLibraryAndExitThread(g_hModule, EXIT_SUCCESS);
     return NULL;
 }
 
@@ -777,13 +884,14 @@ DWORD __stdcall InitializeHook(LPVOID)
 
 BOOL __stdcall DllMain(HINSTANCE hModule, DWORD dwReason, LPVOID lpReserved)
 { 
+	g_hModule = hModule;
 	switch (dwReason)
 	{
 	case DLL_PROCESS_ATTACH: // A process is loading the DLL.
 		DisableThreadLibraryCalls(hModule);
 		GetModuleFileName(hModule, dlldir, 512);
 		for (size_t i = strlen(dlldir); i > 0; i--) { if (dlldir[i] == '\\') { dlldir[i + 1] = 0; break; } }
-		CreateThread(NULL, 0, InitializeHook, NULL, 0, NULL);
+		CreateThread(NULL, 0, InitializeHook, g_hModule, 0, NULL);
 		break;
 
 	case DLL_PROCESS_DETACH: // A process unloads the DLL.
